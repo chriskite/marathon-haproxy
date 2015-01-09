@@ -1,0 +1,41 @@
+#!/bin/bash
+
+TMP_CONFIG="/tmp/haproxy.cfg"
+CONFIG="/etc/haproxy/haproxy.cfg"
+PIDFILE="/var/run/haproxy.pid"
+INTERVAL=5
+
+if [ ! -z "$MARATHON_INTERVAL" ]
+then
+  INTERVAL=$MARATHON_INTERVAL
+fi
+
+if [ -z "$MARATHON_URL" ]
+then
+  echo "MARATHON_URL is unset"
+  exit 1
+fi
+
+echo "Marathon URL: $MARATHON_URL"
+echo "Marathon refresh interval: $INTERVAL"
+
+while :
+do
+  # write the marathon services in haproxy.cfg format 
+  /bin/haproxy-marathon-bridge $MARATHON_URL > $TMP_CONFIG
+
+  # we'll only reload haproxy if conf has changed
+  if ! diff -q $TMP_CONFIG $CONFIG >&2
+  then
+    echo "Writing new Marathon services to haproxy.cfg"
+    cat $TMP_CONFIG
+    cat $TMP_CONFIG > $CONFIG
+    if [ -f "$PIDFILE" ]
+    then
+      # reload haproxy without dropping connections
+      haproxy -f /etc/haproxy/haproxy.cfg -p $PIDFILE -sf $(cat $PIDFILE)
+    fi
+  fi
+
+  sleep $INTERVAL
+done

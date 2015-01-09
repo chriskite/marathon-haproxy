@@ -1,0 +1,114 @@
+#!/bin/bash
+set -o errexit -o pipefail
+function -h {
+cat <<USAGE
+ USAGE: $name <marathon host:port>+
+
+  Generates a new configuration file for HAProxy from the specified Marathon
+  servers, replaces the file in /etc/haproxy.
+USAGE
+}; function --help { -h ;}
+export LC_ALL=en_US.UTF-8
+
+name=haproxy-marathon-bridge
+script_path=/usr/local/bin/"$name"
+conf_file=haproxy.cfg
+log_host=127.0.0.1
+log_facility=local0
+global_maxconn=8192
+default_maxconn=2048
+
+if [ ! -z "$HAPROXY_LOG_HOST" ]
+then
+  log_host="${HAPROXY_LOG_HOST}"
+fi
+
+if [ ! -z "$HAPROXY_GLOBAL_MAXCONN" ]
+then
+  global_maxconn=$HAPROXY_GLOBAL_MAXCONN
+fi
+
+if [ ! -z "$HAPROXY_DEFAULT_MAXCONN" ]
+then
+  default_maxconn=$HAPROXY_DEFAULT_MAXCONN
+fi
+
+function main {
+  config "$@"
+}
+
+function config {
+  header
+  apps "$@"
+}
+
+function header {
+cat <<EOF
+global
+  daemon
+  log $log_host $log_facility
+  maxconn $global_maxconn
+
+defaults
+  log                 global
+  retries             3
+  maxconn             $default_maxconn
+  timeout connect     5s
+  timeout client      60s
+  timeout server      60s
+  timeout client-fin  60s
+  timeout tunnel      12h
+
+listen stats :9090
+    mode http
+    stats enable
+    stats realm HAProxy\ Statistics
+    stats uri /
+EOF
+}
+
+function apps {
+  (until curl -sSfLk -m 10 -H 'Accept: text/plain' "${1%/}"/v2/tasks; do [ $# -lt 2 ] && return 1 || shift; done) | while read -r txt
+  do
+    set -- $txt
+    local app_name="$1"
+    local app_port="$2"
+    shift 2
+
+    if [[ $app_port =~ ^[0-9]*$ ]]
+    then
+      cat <<EOF
+
+listen $app_name-$app_port
+  bind 0.0.0.0:$app_port
+  mode tcp
+  option tcplog
+  balance leastconn
+EOF
+      while [[ $# -ne 0 ]]
+      do
+        out "  server ${app_name}-$# $1 check maxconn 0"
+        shift
+      done
+    fi
+  done
+}
+
+function logged {
+  exec 1> >(logger -p user.info -t "$name[$$]")
+  exec 2> >(logger -p user.notice -t "$name[$$]")
+  "$@"
+}
+
+function msg { out "$*" >&2 ;}
+function err { local x=$? ; msg "$*" ; return $(( $x == 0 ? 1 : $x )) ;}
+function out { printf '%s\n' "$*" ;}
+
+# If less than 1 argument is provided, print usage and exit. At least one
+# argument is required as described in the `USAGE` message.
+[ $# -lt 1 ] && { -h; exit 1; }
+
+if [[ ${1:-} ]] && declare -F | cut -d' ' -f3 | fgrep -qx -- "${1:-}"
+then "$@"
+else main "$@"
+fi
